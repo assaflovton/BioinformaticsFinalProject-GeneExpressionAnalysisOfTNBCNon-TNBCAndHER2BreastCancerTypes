@@ -1,0 +1,374 @@
+---
+title: "CombinedAnalysis"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Read the count matrix and experiment data
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+#read counts data 
+cts_prime <- as.matrix(read.csv("sorted.csv", header=T, sep=","))
+
+#add a column with the name of the samples
+cts<-cts_prime[,c("SRR1027171","SRR1027173","SRR1027174","SRR1027175","SRR1027176","SRR1027177","SRR1027178","SRR1027179","SRR1027180",
+"SRR1027181","SRR1027182","SRR1027183","SRR1027184","SRR1027185","SRR1027186","SRR1027187","SRR1027188", "SRR1027189","SRR1027190")]
+
+row.names(cts) <- cts_prime[,1] #append the gene names to the samples
+
+cts<-apply(cts, c(1,2), as.integer) #change the gene names from chars to ints
+
+cts<-cts[complete.cases(cts), ] #remove rows with empty data cells
+
+coldata<-read.csv("coldata.csv",
+                  header = T,
+                  row.names=1,
+                  stringsAsFactors=T)#read the experiment info
+```
+
+Creates the DESeqDataSet based on the different cancer types and the control group 
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+library("magrittr")
+levels(coldata$cancer_type) #check if the control group is first
+levels(coldata$cancer_type) <- c("NBS","HER2","Non-TBNC","TNBC")
+coldata$cancer_type <- relevel(coldata$cancer_type, "NBS") #place the control group first 
+levels(coldata$cancer_type) #validate the changes
+
+#create the des object by looking at the different groups of cancer and control group
+library("DESeq2")
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ cancer_type)
+
+#remove rows with low insignificant counts
+dds <- dds[rowSums(counts(dds)) > 1,]
+
+
+# DESeq2 offers two transformations for count data that stabilize the variance across the mean:     
+# -The variance stabilizing transformation (VST) for negative binomial data with a dispersion-mean trend implemented in the vst function
+# -The regularized-logarithm transformation implemented in rlog() function.
+
+
+rld <- rlog(dds,blind = FALSE)
+#head(assay(rld), 3)
+
+vsd <- vst(dds,blind = FALSE)
+#head(assay(vsd), 3)
+
+# In the above function calls, we specified blind = FALSE, which means that differences between cell lines and treatment (the variables in the design) will not contribute to the expected variance-mean trend of the experiment. The experimental design is not used directly in the transformation, only in estimating the global amount of variability in the counts. For a fully unsupervised transformation, one can set blind = TRUE ( the default).
+
+```
+
+Figure 1: Create a heatmap of the samples
+
+```{r eval=TRUE, echo=TRUE, fig.height=10, fig.width=10, message=FALSE, warning=FALSE}
+
+sampleDists <- dist(t(assay(rld)))
+
+library ("pheatmap")
+library ("RColorBrewer")
+
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste( rld$cancer_type, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+library(ComplexHeatmap)
+my_hclust_gene <- hclust(sampleDists, method = "complete")
+ 
+# install if necessary
+#install.packages("dendextend")
+ 
+# load package
+library(dendextend)
+ 
+as.dendrogram(my_hclust_gene) %>%
+  plot(horiz = TRUE)
+my_gene_col <- cutree(tree = as.dendrogram(my_hclust_gene), k = 4)
+my_gene_col <- data.frame(cluster = ifelse(test = my_gene_col == 1, yes = "cluster 1", no = 
+            ifelse(test = my_gene_col == 2, yes = "cluster 2", no =
+            ifelse(test = my_gene_col == 3, yes = "cluster 3", no  = "cluster 4"))))
+#head(my_gene_col)
+#Heatmap of sample-to-sample distances using the regularized-logarithm transformed values
+pheatmap(sampleDistMatrix, annotation_row = my_gene_col, col = colors)
+```
+
+Figure 2: Run PCA analysis
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+#Running PCA on the samples 
+plotPCA(vsd, intgroup=c("cancer_type"))
+```
+
+Figure 3: Creates a heatmap of the top 20 up regulated genes in and cluster by value similarities 
+
+```{r eval=TRUE, echo=TRUE, fig.height=10, fig.width=10, message=FALSE, warning=FALSE}
+# In the sample distance heatmap made previously, the dendrogram at the side shows us a hierarchical clustering of the samples. Such a clustering can also be performed for the genes. Since the clustering is only relevant for genes that actually carry a signal, one usually would only cluster a subset of the most highly variable genes. Here, for demonstration, let us select the 20 genes with the highest variance across samples.
+
+#rowVars: Variance estimates for each row in a matrix
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 20)
+
+mat  <- assay(vsd)[topVarGenes, ]
+mat<-mat-rowMeans(mat)
+anno <- as.data.frame(colData(vsd)[, c("cancer_type")])
+rownames(anno) <- colnames(mat)
+pheatmap(mat, annotation_col = anno)
+
+#Treatment status and cell line information are shown with colored bars at the top of the heatmap. Blocks of genes that covary across patients.
+```
+
+Creates the DESeqDataSet based on the different of normal breast sample and cancered breast 
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+library("magrittr")
+levels(coldata$condition) #check if the control group is first
+coldata$condition <- relevel(coldata$condition, "normal") #place the control group first 
+levels(coldata$condition)#validate the changes
+
+dds2 <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ condition)
+
+#remove rows with low insignificant counts
+dds2 <- dds2[rowSums(counts(dds2)) > 1,]
+
+dds_analysis <- DESeq(dds2)
+```
+
+Lets look at the interesting counts (with low pvalue and high absolute value of log2foldchange)
+
+```{r eval=TRUE, echo=TRUE, fig.height=10, fig.width=10, message=FALSE, warning=FALSE}
+
+library("EnhancedVolcano")
+dds <- DESeq(dds2, betaPrior=FALSE)
+res <- results(dds, contrast = c('condition','cancer', 'normal'))
+res <- lfcShrink(dds,type = 'normal', contrast = c('condition','cancer', 'normal'),res=res) 
+```
+
+
+```{r eval=TRUE, echo=TRUE, fig.height=10, fig.width=10, message=FALSE, warning=FALSE}
+EnhancedVolcano(res,
+    lab = rownames(res),
+    x = 'log2FoldChange',
+    y = 'pvalue')
+```
+
+Lets keep only the significant counts by choosing p-value < 0.05 and log2foldchange > 1 or log2foldchange < -1
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+#Calling results without any arguments will extract the estimated log2 fold changes and p values for the last variable in the design formula (design = ~ condition)
+
+#If we lower the false discovery rate threshold, we should also inform the results() function about it, so that the function can use this threshold for the optimal independent filtering that it performs:
+# If we want to raise the log2 fold change threshold, so that we test for genes that show more substantial changes due to treatment, we simply supply a value on the log2 scale. For example, by specifying lfcThreshold = 1, we test for genes that show significant effects of treatment on gene counts more than doubling or less than halving, because 2^1=2.
+
+res.05.LFC1 <- results(dds_analysis, alpha = 0.05, lfcThreshold=1)
+table(res.05.LFC1$padj < 0.05)
+
+#As res is a data frame that carries also a metadata with information on the meaning of the columns:
+summary(res.05.LFC1)
+```
+
+Running combined analysis between normal and cancer:
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+#We subset the results table to the genes with FDR<0.1 and then sort it by the log2 fold change estimate to get the significant genes with the strongest down-regulation:
+resSig <- subset(res.05.LFC1)
+head(resSig[ order(resSig$log2FoldChange), ])
+
+#The genes with the strongest up-regulation due to the cancer:
+head(resSig[ order(resSig$log2FoldChange, decreasing = TRUE), ])
+```
+
+Adding annotation to the gene names:
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+pacman::p_load("AnnotationDbi")
+#fixes a bug in the communication between the latest release of the RSQLite package and RStudio. Without it the org.Hs.eg.db package can't be loaded.
+options(connectionObserver = NULL)
+library(org.Hs.eg.db)
+
+columns(org.Hs.eg.db)
+
+#The genes with the strongest up-regulation due to treatment
+ens.str <- (rownames(res))
+res.05.LFC1$ensembl <- mapIds(org.Hs.eg.db,
+                     keys=ens.str,
+                     column="ENSEMBL",
+                     keytype="SYMBOL",
+                     multiVals="first")
+res.05.LFC1$entrez <- mapIds(org.Hs.eg.db,
+                     keys=ens.str,
+                     column="ENTREZID",
+                     keytype="SYMBOL",
+                     multiVals="first")
+
+head(res.05.LFC1)
+```
+
+Exporting the results:
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+resOrdered <- res.05.LFC1[order(res.05.LFC1$pvalue),]
+head(resOrdered)
+resOrderedDF <- as.data.frame(resOrdered)[1:100, ]
+write.csv(resOrderedDF, file = "resultsCombinedNormalVs.Cancer.csv")
+
+```
+
+Running separated analysis between normal and HER2:
+
+```{r}
+#read counts data 
+cts_prime <- as.matrix(read.csv("sortedHER2.csv", header=T, sep=","))
+#add a column with the name of the samples
+cts<-cts_prime[,c("SRR1027183","SRR1027184","SRR1027185","SRR1027186","SRR1027187","SRR1027188", "SRR1027189","SRR1027190")]
+#append the gene names to the samples
+row.names(cts) <- cts_prime[,1]
+#change the gene names from chars to integers
+cts<-apply(cts, c(1,2), as.integer)
+#remove rows with empty data cells
+cts<-cts[complete.cases(cts), ]
+#read the experiment info
+coldata<-read.csv("coldataHER2.csv",
+                  header = T,
+                  row.names=1,
+                  stringsAsFactors=T)
+
+library("magrittr")
+
+#------------------------for normal vs HER2
+levels(coldata$cancer_type) #check if the control group is first
+coldata$cancer_type <- relevel(coldata$cancer_type, "NBS", "TNBC","Non-TNBC","HER2") 
+levels(coldata$cancer_type) #validate the changes
+library("DESeq2")
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ cancer_type)
+dds <- dds[rowSums(counts(dds)) > 1,]
+
+dds_analysis <- DESeq(dds)
+res.05.LFC1 <- results(dds_analysis, alpha = 0.05, lfcThreshold=1)
+#table(res.05.LFC1$padj < 0.05)
+summary(res.05.LFC1)
+resSig <- subset(res.05.LFC1) 
+head(resSig[ order(resSig$log2FoldChange), ]) #down-regulation
+head(resSig[ order(resSig$log2FoldChange, decreasing = TRUE), ]) #up-regulation
+```
+
+Exporting the results:
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+resOrdered <- res.05.LFC1[order(res.05.LFC1$pvalue),]
+head(resOrdered)
+resOrderedDF <- as.data.frame(resOrdered)[1:100, ]
+write.csv(resOrderedDF, file = "resultsNBSVs.HER2.csv")
+
+```
+
+Running separated analysis between normal and Non-TNBC:
+
+```{r}
+#read counts data 
+cts_prime <- as.matrix(read.csv("sortedNon-TNBC.csv", header=T, sep=","))
+#add a column with the name of the samples
+cts<-cts_prime[,c("SRR1027177","SRR1027178","SRR1027179","SRR1027180",
+"SRR1027181","SRR1027182","SRR1027188", "SRR1027189","SRR1027190")]
+#append the gene names to the samples
+row.names(cts) <- cts_prime[,1]
+#change the gene names from chars to integers
+cts<-apply(cts, c(1,2), as.integer)
+#remove rows with empty data cells
+cts<-cts[complete.cases(cts), ]
+#read the experiment info
+coldata<-read.csv("coldataNon-TNBC.csv",
+                  header = T,
+                  row.names=1,
+                  stringsAsFactors=T)
+
+library("magrittr")
+
+#------------------------for normal vs Non-TNBC
+levels(coldata$cancer_type) #check if the control group is first
+coldata$cancer_type <- relevel(coldata$cancer_type, "NBS", "TNBC","HER2","Non-TNBC") 
+levels(coldata$cancer_type) #validate the changes
+library("DESeq2")
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ cancer_type)
+
+dds <- dds[rowSums(counts(dds)) > 1,]
+
+dds_analysis <- DESeq(dds)
+res.05.LFC1 <- results(dds_analysis, alpha = 0.05, lfcThreshold=1)
+#table(res.05.LFC1$padj < 0.05)
+summary(res.05.LFC1)
+resSig <- subset(res.05.LFC1) 
+head(resSig[ order(resSig$log2FoldChange), ]) #down-regulation
+head(resSig[ order(resSig$log2FoldChange, decreasing = TRUE), ]) #up-regulation
+
+```
+
+Exporting the results:
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+resOrdered <- res.05.LFC1[order(res.05.LFC1$pvalue),]
+head(resOrdered)
+resOrderedDF <- as.data.frame(resOrdered)[1:100, ]
+write.csv(resOrderedDF, file = "resultsNBSVs.Non-TNBC.csv")
+
+```
+
+Running separated analysis between normal and TNBC:
+
+```{r}
+#read counts data 
+cts_prime <- as.matrix(read.csv("sortedTNBC.csv", header=T, sep=","))
+#add a column with the name of the samples
+cts<-cts_prime[,c("SRR1027171","SRR1027173","SRR1027174","SRR1027175","SRR1027176","SRR1027188", "SRR1027189","SRR1027190")]
+#append the gene names to the samples
+row.names(cts) <- cts_prime[,1]
+#change the gene names from chars to integers
+cts<-apply(cts, c(1,2), as.integer)
+#remove rows with empty data cells
+cts<-cts[complete.cases(cts), ]
+#read the experiment info
+coldata<-read.csv("coldataTNBC.csv",
+                  header = T,
+                  row.names=1,
+                  stringsAsFactors=T)
+
+library("magrittr")
+
+#------------------------for normal vs TNBC
+levels(coldata$cancer_type) #check if the control group is first
+coldata$cancer_type <- relevel(coldata$cancer_type, "NBS", "Non-TNBC","HER2","TNBC") 
+levels(coldata$cancer_type) #validate the changes
+library("DESeq2")
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ cancer_type)
+dds <- dds[rowSums(counts(dds)) > 1,]
+
+dds_analysis <- DESeq(dds)
+res.05.LFC1 <- results(dds_analysis, alpha = 0.05, lfcThreshold=1)
+#table(res.05.LFC1$padj < 0.05)
+summary(res.05.LFC1)
+resSig <- subset(res.05.LFC1) 
+head(resSig[ order(resSig$log2FoldChange), ]) #down-regulation
+head(resSig[ order(resSig$log2FoldChange, decreasing = TRUE), ]) #up-regulation
+
+```
+
+Exporting the results:
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+resOrdered <- res.05.LFC1[order(res.05.LFC1$pvalue),]
+head(resOrdered)
+resOrderedDF <- as.data.frame(resOrdered)[1:100, ]
+write.csv(resOrderedDF, file = "resultsNBSVs.TNBC.csv")
+
+```
